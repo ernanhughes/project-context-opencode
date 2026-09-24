@@ -10,6 +10,7 @@ set -euo pipefail
 
 MODEL="${1:?Usage: smoke.sh <provider/model[#variant]>}"
 PLUGIN_ID="${PLUGIN_ID:-project-context}"
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 fail() { echo ""; echo "SMOKE FAIL: $1" >&2; exit 1; }
 unsupported() { echo ""; echo "SMOKE UNSUPPORTED: $1" >&2; exit 2; }
@@ -120,10 +121,43 @@ echo "$SMOKE_RESULT"
 [ $STATUS -eq 0 ] || exit 1
 
 REQUESTED="${MODEL%%#*}"
-OBSERVED="$(echo "$SMOKE_RESULT" | sed -n 's/^OBSERVED=//p' | sed 's/#$//')"
+OBSERVED="$(echo "$SMOKE_RESULT" | sed -n 's/^OBSERVED=//p' | sed 's/#.*$//')"
 [ "$OBSERVED" = "$REQUESTED" ] || fail "requested model '$REQUESTED' != observed '$OBSERVED'. Failing closed."
 echo "attribution: requested model = observed model."
+PLUGIN_COMMIT="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+CAPTURE_OPENCODE_VERSION="$(python3 - "$CAPTURE_FILE" <<'EOF'
+import json, sys
+recs = [json.loads(l) for l in open(sys.argv[1], encoding="utf-8") if l.strip()]
+ctx = [r for r in recs if r.get("request_kind") == "context"]
+print(ctx[-1].get("opencode_version", "unknown"))
+EOF
+)"
+CAPTURE_SEQ="$(python3 - "$CAPTURE_FILE" <<'EOF'
+import json, sys
+recs = [json.loads(l) for l in open(sys.argv[1], encoding="utf-8") if l.strip()]
+ctx = [r for r in recs if r.get("request_kind") == "context"]
+print(ctx[-1].get("invocation_sequence", 0))
+EOF
+)"
+python3 - "$WORK_ROOT/canary.json" <<EOF
+import json
+canary = {
+    "canary": "project-context transport liveness",
+    "result": "PASS",
+    "marker": "$MARKER",
+    "session_id": "$TRACE_SESSION",
+    "invocation_sequence": $CAPTURE_SEQ,
+    "requested_model": "$REQUESTED",
+    "observed": "$OBSERVED",
+    "opencode_version": "$CAPTURE_OPENCODE_VERSION",
+    "plugin_package": "project-context-opencode",
+    "plugin_version": "0.1.0",
+    "plugin_commit": "$PLUGIN_COMMIT",
+}
+open("$WORK_ROOT/canary.json", "w", encoding="utf-8").write(json.dumps(canary, indent=2))
+EOF
 echo ""
 echo "SMOKE PASS"
 echo "  marker reconciled exactly once, post-mutation, same session."
 echo "  workRoot: $WORK_ROOT"
+echo "  canary  : $WORK_ROOT/canary.json"

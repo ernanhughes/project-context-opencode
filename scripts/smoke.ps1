@@ -230,8 +230,36 @@ Write-Host "attribution: requested model = observed model." -ForegroundColor Gre
 
 # --- verdict -----------------------------------------------------------
 
+$RepoRoot = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
+$pluginCommit = "unknown"
+try { $pluginCommit = (& git -C $RepoRoot rev-parse HEAD 2>$null | Out-String).Trim() } catch { }
+
+$canary = [ordered]@{
+  canary            = "project-context transport liveness"
+  result            = "PASS"
+  marker            = $marker
+  session_id        = $capture.session_id
+  invocation_sequence = $capture.invocation_sequence
+  pre_blocks        = $trace.preBlocks
+  post_blocks       = $trace.postBlocks
+  requested_model   = $requested
+  observed_provider = $observedProvider
+  observed_model    = $observedModel
+  observed_variant  = $observedVariant
+  opencode_version  = $capture.opencode_version
+  plugin_package    = "project-context-opencode"
+  plugin_version    = "0.1.0"
+  plugin_commit     = $pluginCommit
+  completed_at      = (Get-Date).ToUniversalTime().ToString("o")
+}
+$canary | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $workRoot "canary.json") -Encoding utf8NoBOM
+
 Write-Host ""
 Write-Host "SMOKE PASS" -ForegroundColor Green
 Write-Host "  marker reconciled exactly once, post-mutation, same session."
 Write-Host "  workRoot: $workRoot"
+Write-Host "  canary  : $(Join-Path $workRoot 'canary.json')"
+Write-Host "  Harness use: pass this canary to the Project Context preflight"
+Write-Host "  transport gate. Copy it to <project-context>/.local/transport-canary.json"
+Write-Host "  (local-only, never committed) before any behavioural wave."
 exit 0
