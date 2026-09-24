@@ -1,0 +1,222 @@
+#!/usr/bin/env pwsh
+# smoke.ps1 — first-class liveness check for project-context-opencode.
+#
+# Proves the exact transport the research harness needs, using exactly
+# one trivial model request:
+#
+#   runtime injection trace + independent observer capture
+#   + marker reconciliation + provider/model attribution
+#
+# Usage:
+#   .\scripts\smoke.ps1 -Model "opencode/muse-spark-1.3-contributor-free"
+#
+# Exit codes: 0 PASS, 1 FAIL (fail closed), 2 UNSUPPORTED environment
+# (e.g. requested model unresolvable: no inference was attempted).
+#
+# The model reply text is diagnostic only. A reply such as
+# TRANSPORT-PROBE-OK never constitutes proof; the proof is the
+# reconciled trace + capture pair below.
+#
+# Ordinary OpenCode configuration is left untouched. Only the five
+# PROJECT_CONTEXT_* process variables are set, for the child process
+# only, and restored afterwards.
+
+[CmdletBinding()]
+param(
+  [Parameter(Mandatory = $true)]
+  [string]$Model,
+
+  [string]$PluginId = "project-context"
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+
+$ManagedEnv = @(
+  "PROJECT_CONTEXT_CAPTURE",
+  "PROJECT_CONTEXT_SPOOL_DIR",
+  "PROJECT_CONTEXT_RUNTIME",
+  "PROJECT_CONTEXT_RUNTIME_BLOCK",
+  "PROJECT_CONTEXT_RUNTIME_TRACE_DIR"
+)
+
+function Fail([string]$message) {
+  Write-Host ""
+  Write-Host "SMOKE FAIL: $message" -ForegroundColor Red
+  exit 1
+}
+
+function Unsupported([string]$message) {
+  Write-Host ""
+  Write-Host "SMOKE UNSUPPORTED: $message" -ForegroundColor Yellow
+  exit 2
+}
+
+# --- preconditions -------------------------------------------------
+
+$opencode = Get-Command "opencode" -ErrorAction SilentlyContinue
+if (-not $opencode) { Fail "opencode is not on PATH." }
+
+$pluginList = (& opencode plugin list 2>&1 | Out-String)
+if ($pluginList -notmatch [regex]::Escape($PluginId)) {
+  Fail ("plugin '$PluginId' not in `opencode plugin list`. Install first:`n" +
+    "  opencode plugin add github:ernanhughes/project-context-opencode")
+}
+Write-Host "plugin '$PluginId' is installed." -ForegroundColor Green
+
+# --- isolated workspace --------------------------------------------
+
+$stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+$rand = -join ((48..57) + (65..90) | Get-Random -Count 8 | ForEach-Object { [char]$_ })
+$marker = "SMOKE-PROBE-$stamp-$rand"
+$workRoot = Join-Path ([System.IO.Path]::GetTempPath()) "pc-smoke-$stamp-$rand"
+$spoolDir = Join-Path $workRoot "spool"
+$traceDir = Join-Path $workRoot "trace"
+$runDir = Join-Path $workRoot "repo"
+$blockPath = Join-Path $workRoot "runtime-block.txt"
+$stdoutPath = Join-Path $workRoot "model-stdout.txt"
+$stderrPath = Join-Path $workRoot "model-stderr.txt"
+
+New-Item -ItemType Directory -Force -Path $spoolDir, $traceDir, $runDir | Out-Null
+Set-Content -LiteralPath (Join-Path $runDir "README.md") -Value "# smoke throwaway`n" -Encoding utf8
+
+$block = "[CONTEXT RUNTIME]`n[SMOKE CONSTRAINT]`nFor this synthetic liveness probe only,`nthe marker value is $marker.`n[/CONTEXT RUNTIME]"
+Set-Content -LiteralPath $blockPath -Value $block -Encoding utf8NoBOM
+
+Write-Host "marker   : $marker"
+Write-Host "spool    : $spoolDir"
+Write-Host "trace    : $traceDir"
+Write-Host "model    : $Model"
+
+# --- child-only environment ----------------------------------------
+
+$previous = @{}
+foreach ($key in $ManagedEnv) { $previous[$key] = $env:$key }
+$env:PROJECT_CONTEXT_CAPTURE = "1"
+$env:PROJECT_CONTEXT_SPOOL_DIR = $spoolDir
+$env:PROJECT_CONTEXT_RUNTIME = "inject"
+$env:PROJECT_CONTEXT_RUNTIME_BLOCK = $blockPath
+$env:PROJECT_CONTEXT_RUNTIME_TRACE_DIR = $traceDir
+
+$exitCode = 1
+try {
+  $proc = Start-Process -FilePath $opencode.Source `
+    -ArgumentList @("run", "--model", $Model, "--title", "pc-smoke-$rand",
+      "Reply with exactly the word READY and nothing else.") `
+    -WorkingDirectory $runDir `
+    -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath `
+    -NoNewWindow -PassThru -Wait
+  $exitCode = $proc.ExitCode
+}
+finally {
+  foreach ($key in $ManagedEnv) {
+    if ($null -eq $previous[$key]) { Remove-Item "env:$key" -ErrorAction SilentlyContinue }
+    else { Set-Item "env:$key" $previous[$key] }
+  }
+}
+
+if ($exitCode -ne 0) {
+  $errText = ""
+  if (Test-Path -LiteralPath $stderrPath) { $errText = Get-Content -LiteralPath $stderrPath -Raw }
+  if ($errText -match "(?i)(model.*not found|unknown model|provider.*not|unauthori|authenticat|no auth|API key|invalid.*model|could not resolve)") {
+    Unsupported ("model '$Model' is not usable here (exit $exitCode). " +
+      "No inference was attempted. Details in $stderrPath")
+  }
+  Fail ("model request exited $exitCode. See $stderrPath")
+}
+Write-Host "model request exited 0." -ForegroundColor Green
+
+# --- runtime trace ---------------------------------------------------
+
+$traceFile = Join-Path $traceDir "runtime-trace.jsonl"
+if (-not (Test-Path -LiteralPath $traceFile)) {
+  Fail ("no runtime trace at $traceFile. The runtime hook never executed: " +
+    "check that PROJECT_CONTEXT_RUNTIME=inject reached the OpenCode process.")
+}
+
+$hookRecords = Get-Content -LiteralPath $traceFile |
+  Where-Object { $_ -match '\S' } |
+  ForEach-Object { $_ | ConvertFrom-Json } |
+  Where-Object { $_.kind -eq "hook" }
+
+if (-not $hookRecords -or $hookRecords.Count -lt 1) {
+  Fail "runtime trace has no hook records: injection never executed."
+}
+
+$injected = @($hookRecords | Where-Object {
+    $_.outcome -eq "injected" -and ($_.postBlocks - $_.preBlocks) -eq 1
+  })
+if ($injected.Count -lt 1) {
+  $outcomes = ($hookRecords | ForEach-Object { $_.outcome }) -join ","
+  Fail ("no successful injection in trace (outcomes: $outcomes).")
+}
+$trace = $injected[-1]
+Write-Host ("runtime    : outcome=injected preBlocks={0} postBlocks={1} session={2}" `
+    -f $trace.preBlocks, $trace.postBlocks, $trace.sessionID) -ForegroundColor Green
+
+# --- observer capture ------------------------------------------------
+
+$day = (Get-Date).ToString("yyyy-MM-dd")
+$captureFile = Join-Path $spoolDir $day "captures.jsonl"
+if (-not (Test-Path -LiteralPath $captureFile)) {
+  Fail ("no observer spool at $captureFile. Capture was not live for this " +
+    "request: check that PROJECT_CONTEXT_CAPTURE=1 reached the OpenCode process. " +
+    "An empty spool proves nothing about model activity.")
+}
+
+$records = Get-Content -LiteralPath $captureFile |
+  Where-Object { $_ -match '\S' } |
+  ForEach-Object { $_ | ConvertFrom-Json } |
+  Where-Object { $_.request_kind -eq "context" }
+
+if (-not $records -or $records.Count -lt 1) {
+  Fail "observer spool has no context records for this request."
+}
+
+$matched = @()
+foreach ($record in $records) {
+  $texts = @($record.system | ForEach-Object { $_.text })
+  $exact = @($texts | Where-Object { $_ -eq $block })
+  $marked = @($texts | Where-Object { $_ -and $_ -match [regex]::Escape($marker) })
+  if ($exact.Count -eq 1 -and $marked.Count -eq 1) { $matched += $record }
+}
+
+if ($matched.Count -ne 1) {
+  Fail ("expected exactly one context record carrying the marker exactly once " +
+    "as the byte-identical block; found $($matched.Count) of $($records.Count).")
+}
+$capture = $matched[0]
+
+$texts = @($capture.system | ForEach-Object { $_.text })
+if ($texts[$texts.Count - 1] -ne $block) {
+  Fail "injected block is not last in the captured system array."
+}
+
+if ($capture.session_id -ne $trace.sessionID) {
+  Fail ("session mismatch: trace=$($trace.sessionID) capture=$($capture.session_id).")
+}
+
+$observedProvider = $capture.model.provider_id
+$observedModel = $capture.model.id
+$observedVariant = $capture.model.variant
+Write-Host ("observer   : session={0} seq={1} systemBlocks={2}" `
+    -f $capture.session_id, $capture.invocation_sequence, $texts.Count) -ForegroundColor Green
+Write-Host ("observed   : provider=$observedProvider model=$observedModel variant=$observedVariant")
+
+# --- requested vs observed attribution -------------------------------
+
+$requested = $Model -replace '#.*$', ''
+$reqProvider, $reqId = $requested -split '/', 2
+if ($observedProvider -ne $reqProvider -or $observedModel -ne $reqId) {
+  Fail ("requested model '$requested' != observed '$observedProvider/$observedModel'. " +
+    "Failing closed: the request may not have run where intended.")
+}
+Write-Host "attribution: requested model = observed model." -ForegroundColor Green
+
+# --- verdict -----------------------------------------------------------
+
+Write-Host ""
+Write-Host "SMOKE PASS" -ForegroundColor Green
+Write-Host "  marker reconciled exactly once, post-mutation, same session."
+Write-Host "  workRoot: $workRoot"
+exit 0
