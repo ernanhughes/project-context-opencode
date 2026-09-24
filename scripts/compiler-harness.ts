@@ -135,6 +135,7 @@ function cmdReconcile(argv: string[]): number {
 
   // Runtime evidence: latest hook record.
   let runtime: ReconcileInput["runtime"] = null;
+  let hookSession: string | null = null;
   try {
     const lines = readFileSync(tracePath, "utf-8")
       .split("\n")
@@ -152,6 +153,7 @@ function cmdReconcile(argv: string[]): number {
         preBlocks: last.preBlocks,
         postBlocks: last.postBlocks,
       };
+      hookSession = typeof last.sessionID === "string" ? last.sessionID : null;
     }
   } catch {
     runtime = null;
@@ -174,9 +176,17 @@ function cmdReconcile(argv: string[]): number {
       ),
     );
     blockRecords = withBlock.length;
+    // An agent loop may inject the same block across several requests
+    // of one session. Pair the latest hook with the latest
+    // block-containing record of the same session; marker-once is
+    // still enforced within that record by the pure reconciler.
+    const sameSession = withBlock.filter(
+      (record) => !hookSession || record["session_id"] === hookSession,
+    );
+    const pool = sameSession.length > 0 ? sameSession : [];
     const chosen =
-      withBlock.length === 1
-        ? (withBlock[0] as Record<string, unknown>)
+      pool.length > 0
+        ? (pool[pool.length - 1] as Record<string, unknown>)
         : (records[records.length - 1] as Record<string, unknown> | undefined);
     if (chosen) {
       const system = (chosen["system"] ?? []) as Array<{ text?: string }>;
@@ -217,17 +227,7 @@ function cmdReconcile(argv: string[]): number {
     expectedMarker: evidence.expectedMarker,
     requestedModel,
   };
-  let receipt = reconcileCompiledTransport(input);
-  if (blockRecords > 1) {
-    receipt = {
-      ...receipt,
-      status: "FAIL",
-      failures: [
-        ...receipt.failures,
-        `runtime block observed in ${blockRecords} context records, not exactly one`,
-      ],
-    };
-  }
+  const receipt = reconcileCompiledTransport(input);
   writeFileSync(receiptOut, JSON.stringify(receipt, null, 2) + "\n", "utf-8");
   const canary = {
     schema: "project_context.compile_canary.v1",
@@ -255,6 +255,7 @@ function cmdReconcile(argv: string[]): number {
       sequence: receipt.observer_sequence,
       observed_model: receipt.observed_model,
       marker_count: receipt.marker_count,
+      block_records_total: blockRecords,
     },
     reconciliation: {
       compiler_render_exact: receipt.compiler_render_present,
