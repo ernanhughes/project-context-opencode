@@ -54,8 +54,11 @@ function Unsupported([string]$message) {
 
 # --- preconditions -------------------------------------------------
 
-$opencode = Get-Command "opencode" -ErrorAction SilentlyContinue
-if (-not $opencode) { Fail "opencode is not on PATH." }
+$opencodeCmd = (where.exe opencode.cmd 2>$null | Select-Object -First 1)
+if (-not $opencodeCmd) {
+  $opencodeCmd = (Get-Command "opencode.cmd" -ErrorAction SilentlyContinue).Source
+}
+if (-not $opencodeCmd) { Fail "opencode.cmd is not on PATH." }
 
 $pluginList = (& opencode plugin list 2>&1 | Out-String)
 if ($pluginList -notmatch [regex]::Escape($PluginId)) {
@@ -81,7 +84,9 @@ New-Item -ItemType Directory -Force -Path $spoolDir, $traceDir, $runDir | Out-Nu
 Set-Content -LiteralPath (Join-Path $runDir "README.md") -Value "# smoke throwaway`n" -Encoding utf8
 
 $block = "[CONTEXT RUNTIME]`n[SMOKE CONSTRAINT]`nFor this synthetic liveness probe only,`nthe marker value is $marker.`n[/CONTEXT RUNTIME]"
-Set-Content -LiteralPath $blockPath -Value $block -Encoding utf8NoBOM
+# Exact bytes, no additions: a trailing newline would become part of the
+# injected block and break byte-identity reconciliation below.
+Set-Content -LiteralPath $blockPath -Value $block -Encoding utf8NoBOM -NoNewline
 
 Write-Host "marker   : $marker"
 Write-Host "spool    : $spoolDir"
@@ -91,7 +96,9 @@ Write-Host "model    : $Model"
 # --- child-only environment ----------------------------------------
 
 $previous = @{}
-foreach ($key in $ManagedEnv) { $previous[$key] = $env:$key }
+foreach ($key in $ManagedEnv) {
+  $previous[$key] = [System.Environment]::GetEnvironmentVariable($key)
+}
 $env:PROJECT_CONTEXT_CAPTURE = "1"
 $env:PROJECT_CONTEXT_SPOOL_DIR = $spoolDir
 $env:PROJECT_CONTEXT_RUNTIME = "inject"
@@ -100,8 +107,11 @@ $env:PROJECT_CONTEXT_RUNTIME_TRACE_DIR = $traceDir
 
 $exitCode = 1
 try {
-  $proc = Start-Process -FilePath $opencode.Source `
-    -ArgumentList @("run", "--model", $Model, "--title", "pc-smoke-$rand",
+  # --standalone: a private server inherits this child-only probe
+  # environment. The shared background service would NOT see
+  # process-scoped variables, so hooks would silently stay disabled.
+  $proc = Start-Process -FilePath $opencodeCmd `
+    -ArgumentList @("run", "--standalone", "--model", $Model, "--title", "pc-smoke-$rand",
       "Reply with exactly the word READY and nothing else.") `
     -WorkingDirectory $runDir `
     -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath `
@@ -110,8 +120,13 @@ try {
 }
 finally {
   foreach ($key in $ManagedEnv) {
-    if ($null -eq $previous[$key]) { Remove-Item "env:$key" -ErrorAction SilentlyContinue }
-    else { Set-Item "env:$key" $previous[$key] }
+    if ($null -eq $previous[$key]) {
+      [System.Environment]::SetEnvironmentVariable($key, $null)
+      Remove-Item "env:$key" -ErrorAction SilentlyContinue
+    }
+    else {
+      [System.Environment]::SetEnvironmentVariable($key, $previous[$key])
+    }
   }
 }
 

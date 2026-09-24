@@ -47,7 +47,10 @@ export PROJECT_CONTEXT_RUNTIME_TRACE_DIR="$TRACE_DIR"
 EXIT_CODE=0
 (
   cd "$RUN_DIR"
-  opencode run --model "$MODEL" --title "pc-smoke-$RAND" \
+  # --standalone: a private server inherits this child-only probe
+  # environment. The shared background service would NOT see
+  # process-scoped variables, so hooks would silently stay disabled.
+  opencode run --standalone --model "$MODEL" --title "pc-smoke-$RAND" \
     "Reply with exactly the word READY and nothing else." \
     >"$STDOUT_PATH" 2>"$STDERR_PATH"
 ) || EXIT_CODE=$?

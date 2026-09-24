@@ -31,8 +31,11 @@ function Fail([string]$message) {
   exit 1
 }
 
-$opencode = Get-Command "opencode" -ErrorAction SilentlyContinue
-if (-not $opencode) { Fail "opencode is not on PATH." }
+$opencodeCmd = (where.exe opencode.cmd 2>$null | Select-Object -First 1)
+if (-not $opencodeCmd) {
+  $opencodeCmd = (Get-Command "opencode.cmd" -ErrorAction SilentlyContinue).Source
+}
+if (-not $opencodeCmd) { Fail "opencode.cmd is not on PATH." }
 
 # 1. installed and visible ------------------------------------------------
 $pluginList = (& opencode plugin list 2>&1 | Out-String)
@@ -54,6 +57,7 @@ if (-not (Test-Path -LiteralPath $rootEntry -PathType Leaf)) {
 Write-Host "2. package entrypoints resolve." -ForegroundColor Green
 
 # 3. setup executes; hooks register per configuration ----------------------
+$checkScript = Join-Path $RepoRoot "scripts/load-harness.ts"
 $harness = & node $checkScript 2>&1
 $harnessExit = $LASTEXITCODE
 Write-Host $harness
@@ -74,7 +78,10 @@ $prevSpool = $env:PROJECT_CONTEXT_SPOOL_DIR
 $env:PROJECT_CONTEXT_CAPTURE = "1"
 $env:PROJECT_CONTEXT_SPOOL_DIR = $spoolDir
 try {
-  $out = & $opencode.Source run --model "invalid-provider-xyz/invalid-model-xyz" "hi" 2>&1
+  # --standalone so the private server actually sees the probe environment:
+  # setup executes with capture enabled, yet the invalid model must be
+  # rejected before any request — hence no captures.
+  $out = & $opencodeCmd run --standalone --model "invalid-provider-xyz/invalid-model-xyz" "hi" 2>&1
   $code = $LASTEXITCODE
 }
 finally {
