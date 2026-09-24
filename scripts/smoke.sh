@@ -86,8 +86,9 @@ EOF
 [ $? -eq 0 ] || exit 1
 TRACE_SESSION="$(python3 -c "import json; hs=[json.loads(l) for l in open('$TRACE_FILE',encoding='utf-8') if l.strip()]; hs=[h for h in hs if h.get('kind')=='hook' and h.get('outcome')=='injected']; print(hs[-1]['sessionID'])")"
 
-DAY="$(date +%F)"
-CAPTURE_FILE="$SPOOL_DIR/$DAY/captures.jsonl"
+# Spool day folders use UTC dates; the local date may differ near
+# midnight, so search the isolated spool instead of assuming one day.
+CAPTURE_FILE="$(find "$SPOOL_DIR" -name captures.jsonl | head -n 1)"
 [ -f "$CAPTURE_FILE" ] || fail "no observer spool at $CAPTURE_FILE. Capture was not live for this request. An empty spool proves nothing about model activity."
 
 SMOKE_RESULT="$(python3 - "$CAPTURE_FILE" "$TRACE_SESSION" "$MARKER" "$(cat "$BLOCK_PATH")" <<'EOF'

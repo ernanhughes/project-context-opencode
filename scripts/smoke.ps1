@@ -171,18 +171,20 @@ Write-Host ("runtime    : outcome=injected preBlocks={0} postBlocks={1} session=
 
 # --- observer capture ------------------------------------------------
 
-$day = (Get-Date).ToString("yyyy-MM-dd")
-$captureFile = Join-Path $spoolDir $day "captures.jsonl"
-if (-not (Test-Path -LiteralPath $captureFile)) {
-  Fail ("no observer spool at $captureFile. Capture was not live for this " +
+# Spool day folders use UTC dates (captured_at ISO); the local date
+# may differ near midnight, so search the isolated spool recursively
+# instead of assuming one day folder.
+$captureFiles = @(Get-ChildItem -LiteralPath $spoolDir -Recurse -Filter "captures.jsonl" -File -ErrorAction SilentlyContinue)
+if (-not $captureFiles -or $captureFiles.Count -lt 1) {
+  Fail ("no observer spool under $spoolDir. Capture was not live for this " +
     "request: check that PROJECT_CONTEXT_CAPTURE=1 reached the OpenCode process. " +
     "An empty spool proves nothing about model activity.")
 }
 
-$records = Get-Content -LiteralPath $captureFile |
+$records = @($captureFiles | ForEach-Object { Get-Content -LiteralPath $_.FullName } |
   Where-Object { $_ -match '\S' } |
   ForEach-Object { $_ | ConvertFrom-Json } |
-  Where-Object { $_.request_kind -eq "context" }
+  Where-Object { $_.request_kind -eq "context" })
 
 if (-not $records -or $records.Count -lt 1) {
   Fail "observer spool has no context records for this request."
@@ -233,6 +235,16 @@ Write-Host "attribution: requested model = observed model." -ForegroundColor Gre
 $RepoRoot = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
 $pluginCommit = "unknown"
 try { $pluginCommit = (& git -C $RepoRoot rev-parse HEAD 2>$null | Out-String).Trim() } catch { }
+$pluginVersion = "unknown"
+$installedPkg = Join-Path $RepoRoot "node_modules/project-context-opencode/package.json"
+if (Test-Path -LiteralPath $installedPkg) {
+  $pluginVersion = (Get-Content -LiteralPath $installedPkgPath -Raw |
+    ConvertFrom-Json).version
+}
+if (-not $pluginVersion -or $pluginVersion -eq "unknown") {
+  $pluginVersion = (Get-Content -LiteralPath (Join-Path $RepoRoot "package.json") -Raw |
+    ConvertFrom-Json).version
+}
 
 $canary = [ordered]@{
   canary            = "project-context transport liveness"
@@ -248,7 +260,7 @@ $canary = [ordered]@{
   observed_variant  = $observedVariant
   opencode_version  = $capture.opencode_version
   plugin_package    = "project-context-opencode"
-  plugin_version    = "0.1.0"
+  plugin_version    = $pluginVersion
   plugin_commit     = $pluginCommit
   completed_at      = (Get-Date).ToUniversalTime().ToString("o")
 }
