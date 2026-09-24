@@ -140,6 +140,50 @@ the model is unresolvable here — no inference attempted). The model
 reply text is diagnostic only; proof is trace + capture +
 reconciliation, never what the model said.
 
+## Context Compiler integration
+
+This package can consume a `ContextBundle` produced by
+[`project-context-compiler`](https://github.com/ernanhughes/project-context-compiler)
+(pinned dependency, exact commit in `package.json`) and transport it
+through the existing runtime injection path:
+
+```text
+compile
+  ↓
+render
+  ↓
+wrap
+  ↓
+inject
+  ↓
+observe
+  ↓
+reconcile
+```
+
+The compiler decides membership, representation, and order; the
+transport envelope adds metadata _around_ the exact rendered bytes
+without touching them; the observer independently captures the
+post-injection context; pure reconciliation proves hook-boundary
+equivalence. Provider-wire equivalence is not claimed.
+
+Prove the full chain with one trivial live request:
+
+```powershell
+.\scripts\compiler-smoke.ps1 -Model "opencode-go/muse-spark-1.3-contributor"
+```
+
+```bash
+./scripts/compiler-smoke.sh "opencode-go/muse-spark-1.3-contributor"
+```
+
+This compiles a tiny synthetic case via the imported
+`compileContext()`, wraps `renderBundleText()` output in a
+`[CONTEXT RUNTIME]` envelope with a unique marker, injects through
+the unchanged runtime hook, and reconciles trace + capture +
+bundle identity into `compiler-canary.json`. A `CompileFailure`
+stops before any transport is attempted.
+
 ## Safety
 
 - Captured model context can contain sensitive project/session

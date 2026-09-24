@@ -74,10 +74,17 @@ if (Test-Path -LiteralPath $installedPkgPath) {
   $compilerVersion = (Get-Content -LiteralPath $installedPkgPath -Raw |
     ConvertFrom-Json).version
 }
-$lockRaw = Get-Content -LiteralPath (Join-Path $RepoRoot "package-lock.json") -Raw |
-  ConvertFrom-Json
-$lockSpec = $lockRaw.packages."node_modules/project-context-compiler".version
-if ($lockSpec -match '#([0-9a-f]{40})') { $compilerRevision = $Matches[1] }
+# package-lock.json contains an empty-string root key that
+# ConvertFrom-Json rejects, so extract with a targeted regex.
+$lockText = Get-Content -LiteralPath (Join-Path $RepoRoot "package-lock.json") -Raw
+$lockMatch = [regex]::Match(
+  $lockText,
+  '"node_modules/project-context-compiler":\s*\{[^}]*?"resolved":\s*"([^"]+)"',
+  [System.Text.RegularExpressions.RegexOptions]::Singleline
+)
+if ($lockMatch.Success -and $lockMatch.Groups[1].Value -match '([0-9a-f]{40})') {
+  $compilerRevision = $Matches[1]
+}
 if ($compilerVersion -eq "unknown" -or $compilerRevision -eq "unknown") {
   Fail "cannot determine pinned compiler identity from package-lock.json."
 }
@@ -244,7 +251,7 @@ $reconcileCode = $LASTEXITCODE
 
 $receipt = Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json
 Write-Host ("runtime    : outcome={0} session={1}" -f $receipt.runtime_outcome, $receipt.observer_session_id)
-Write-Host ("observer   : session={0} seq={1} systemBlocks=?" -f $receipt.observer_session_id, $receipt.observer_sequence)
+Write-Host ("observer   : session={0} seq={1}" -f $receipt.observer_session_id, $receipt.observer_sequence)
 Write-Host ("observed   : {0} (match={1})" -f $receipt.observed_model, $receipt.model_match)
 Write-Host ("render hash: {0}" -f $receipt.compiler_render_hash)
 Write-Host ("block hash : {0}" -f $receipt.runtime_block_hash)
