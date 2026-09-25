@@ -6,8 +6,9 @@
  * Integrity rule: sha256 over the canonical JSON of the observed
  * blocks {system, messages, tools, options} only. Object keys sorted
  * recursively; arrays keep order; compact serialization with no
- * insignificant whitespace (matching Python
- * json.dumps(sort_keys=True, separators=(",", ":"))).
+ * insignificant whitespace, raw UTF-8 (never ASCII-escaped, matching
+ * Python json.dumps(sort_keys=True, separators=(",", ":"),
+ * ensure_ascii=False))).
  *
  * Version policy: setup requires the OpenCode V2 plugin API
  * (`session.hook("context")`) and an OpenCode 2.x host. The exact

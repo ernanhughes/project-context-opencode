@@ -198,20 +198,28 @@ foreach ($record in $records) {
   if ($exact.Count -eq 1 -and $marked.Count -eq 1) { $matched += $record }
 }
 
-if ($matched.Count -ne 1) {
-  Fail ("expected exactly one context record carrying the marker exactly once " +
-    "as the byte-identical block; found $($matched.Count) of $($records.Count).")
+# An agent loop may issue several requests (including subagent
+# sessions); every context record in this isolated spool must carry
+# the injected block exactly once. Per-request exactness is the
+# invariant, not a global singleton.
+if ($matched.Count -lt 1) {
+  Fail "observer spool has context records but none carries the marker block."
 }
-$capture = $matched[0]
-
-$texts = @($capture.system | ForEach-Object { $_.text })
-if ($texts[$texts.Count - 1] -ne $block) {
-  Fail "injected block is not last in the captured system array."
+if ($matched.Count -ne $records.Count) {
+  Fail ("expected every context record to carry the marker exactly once " +
+    "as the byte-identical block; matched $($matched.Count) of $($records.Count).")
 }
-
-if ($capture.session_id -ne $trace.sessionID) {
-  Fail ("session mismatch: trace=$($trace.sessionID) capture=$($capture.session_id).")
+$traceSessions = @($hookRecords | ForEach-Object { $_.sessionID } | Select-Object -Unique)
+foreach ($record in $matched) {
+  if ($traceSessions -notcontains $record.session_id) {
+    Fail ("record session $($record.session_id) never appears in the runtime trace.")
+  }
+  $texts = @($record.system | ForEach-Object { $_.text })
+  if ($texts[$texts.Count - 1] -ne $block) {
+    Fail "injected block is not last in a captured system array."
+  }
 }
+$capture = $matched[-1]
 
 $observedProvider = $capture.model.provider_id
 $observedModel = $capture.model.id
@@ -259,6 +267,7 @@ $canary = [ordered]@{
   observed_model    = $observedModel
   observed_variant  = $observedVariant
   opencode_version  = $capture.opencode_version
+  context_records   = $matched.Count
   plugin_package    = "project-context-opencode"
   plugin_version    = $pluginVersion
   plugin_commit     = $pluginCommit
