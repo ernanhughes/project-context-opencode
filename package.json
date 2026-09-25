@@ -26,7 +26,7 @@
   },
   "dependencies": {
     "@opencode/plugin": "^2.0.16",
-    "project-context-compiler": "https://github.com/ernanhughes/project-context-compiler/archive/49f726575f685ddbf839f9b4a53d3f39b8759b2e.tar.gz"
+    "project-context-compiler": "https://github.com/ernanhughes/project-context-compiler/archive/287278c714afbe6ae29d74888df15e36f0c3a46c.tar.gz"
   },
   "devDependencies": {
     "@types/node": "25.0.3",
