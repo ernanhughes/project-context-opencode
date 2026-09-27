@@ -137,6 +137,36 @@ test("the spool scan reads the record's own fields, not quoted text inside messa
   }
 });
 
+
+test("spool recovery scans large records in bounded chunks and handles boundary splits", () => {
+  const dir = spool();
+  try {
+    mkdirSync(join(dir, DAY), { recursive: true });
+    const file = join(dir, DAY, "captures.jsonl");
+    const padding = "x".repeat(70 * 1024);
+    const record1 = JSON.stringify({
+      schema: "project_context.opencode_capture.v2",
+      capture_id: "large-1",
+      session_id: "ses-large",
+      invocation_sequence: 7,
+      messages: [{ text: padding }],
+    });
+    const record2 = JSON.stringify({
+      schema: "project_context.opencode_capture.v2",
+      capture_id: "large-2",
+      session_id: "ses-large",
+      invocation_sequence: 19,
+      messages: [{ text: "tail" }],
+    });
+    writeFileSync(file, record1 + "\n" + record2, "utf-8");
+
+    equal(highestInSpool(dir, "ses-large"), 19);
+    equal(highestInSpool(dir, "ses-missing"), null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("state behind the spool cannot cause a reused number", () => {
   const dir = spool();
   try {
