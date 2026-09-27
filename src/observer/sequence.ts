@@ -30,9 +30,12 @@
 import { createHash } from "node:crypto";
 import {
   appendFileSync,
+  closeSync,
   existsSync,
   mkdirSync,
+  openSync,
   readFileSync,
+  readSync,
   readdirSync,
   renameSync,
   statSync,
@@ -106,8 +109,99 @@ function persist(path: string, key: string, last: number): void {
   renameSync(temp, path);
 }
 
-/** Highest `invocation_sequence` the spool already holds for a session, or null. Cheap
- * line filter first; only the record's own adjacent fields are read. */
+const SPOOL_SCAN_CHUNK_BYTES = 64 * 1024;
+const MAX_SEQUENCE_DIGITS = 32;
+
+/** Scan one JSONL spool file without materialising the file, or even one whole
+ * record, in memory. The capture writer emits session_id immediately followed by
+ * invocation_sequence, so the exact byte marker cannot match escaped JSON inside
+ * message text. */
+function highestInFile(file: string, needle: string): number | null {
+  const marker = Buffer.from(needle, "utf8");
+  const chunk = Buffer.allocUnsafe(SPOOL_SCAN_CHUNK_BYTES);
+  const fd = openSync(file, "r");
+  let carry = Buffer.alloc(0);
+  let best: number | null = null;
+
+  try {
+    while (true) {
+      const read = readSync(fd, chunk, 0, chunk.length, null);
+      if (read === 0) break;
+
+      const data =
+        carry.length === 0
+          ? chunk.subarray(0, read)
+          : Buffer.concat([carry, chunk.subarray(0, read)]);
+
+      let searchFrom = 0;
+      let deferredFrom: number | null = null;
+
+      while (true) {
+        const at = data.indexOf(marker, searchFrom);
+        if (at < 0) break;
+
+        const digitsStart = at + marker.length;
+        let digitsEnd = digitsStart;
+        while (
+          digitsEnd < data.length &&
+          data[digitsEnd]! >= 0x30 &&
+          data[digitsEnd]! <= 0x39
+        ) {
+          digitsEnd++;
+        }
+
+        // The marker or number may straddle the next chunk. Defer this match
+        // rather than guessing from a partial sequence value.
+        if (digitsStart >= data.length || digitsEnd === data.length) {
+          deferredFrom = at;
+          break;
+        }
+
+        if (digitsEnd > digitsStart) {
+          const n = Number(data.toString("ascii", digitsStart, digitsEnd));
+          if (Number.isSafeInteger(n) && (best === null || n > best)) best = n;
+        }
+        searchFrom = at + marker.length;
+      }
+
+      if (deferredFrom !== null) {
+        carry = Buffer.from(data.subarray(deferredFrom));
+      } else {
+        const keep = Math.min(
+          data.length,
+          marker.length + MAX_SEQUENCE_DIGITS,
+        );
+        carry = Buffer.from(data.subarray(data.length - keep));
+      }
+    }
+
+    // EOF is a valid terminator for the final JSONL record.
+    const at = carry.indexOf(marker);
+    if (at >= 0) {
+      const digitsStart = at + marker.length;
+      let digitsEnd = digitsStart;
+      while (
+        digitsEnd < carry.length &&
+        carry[digitsEnd]! >= 0x30 &&
+        carry[digitsEnd]! <= 0x39
+      ) {
+        digitsEnd++;
+      }
+      if (digitsEnd > digitsStart) {
+        const n = Number(carry.toString("ascii", digitsStart, digitsEnd));
+        if (Number.isSafeInteger(n) && (best === null || n > best)) best = n;
+      }
+    }
+  } finally {
+    closeSync(fd);
+  }
+
+  return best;
+}
+
+/** Highest `invocation_sequence` the spool already holds for a session, or null.
+ * Historical capture files are scanned in bounded chunks so recovery memory use is
+ * independent of spool size. */
 export function highestInSpool(
   spoolDir: string,
   sessionId: string | null,
@@ -120,15 +214,8 @@ export function highestInSpool(
     if (entry === STATE_DIR || !statSync(day).isDirectory()) continue;
     const file = join(day, "captures.jsonl");
     if (!existsSync(file)) continue;
-    for (const line of readFileSync(file, "utf-8").split("\n")) {
-      const at = line.indexOf(needle);
-      if (at < 0) continue;
-      const match = /^\d+/.exec(line.slice(at + needle.length));
-      if (match) {
-        const n = Number(match[0]);
-        if (best === null || n > best) best = n;
-      }
-    }
+    const found = highestInFile(file, needle);
+    if (found !== null && (best === null || found > best)) best = found;
   }
   return best;
 }
