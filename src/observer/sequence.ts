@@ -31,10 +31,13 @@ import { createHash } from "node:crypto";
 import {
   appendFileSync,
   closeSync,
+  closeSync,
   existsSync,
   openSync,
   mkdirSync,
+  openSync,
   readFileSync,
+  readSync,
   readSync,
   readdirSync,
   renameSync,
