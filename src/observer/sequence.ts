@@ -30,15 +30,19 @@
 import { createHash } from "node:crypto";
 import {
   appendFileSync,
+  closeSync,
   existsSync,
+  openSync,
   mkdirSync,
   readFileSync,
+  readSync,
   readdirSync,
   renameSync,
   statSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 
 export const SEQUENCE_STATE_SCHEMA = "project_context.sequence_state.v1";
 export const CONTROL_SCHEMA = "project_context.opencode_capture.control.v1";
@@ -106,8 +110,52 @@ function persist(path: string, key: string, last: number): void {
   renameSync(temp, path);
 }
 
-/** Highest `invocation_sequence` the spool already holds for a session, or null. Cheap
- * line filter first; only the record's own adjacent fields are read. */
+/** Fixed read bound for recovery. The spool may be arbitrarily large. */
+export const SPOOL_SCAN_CHUNK_BYTES = 64 * 1024;
+
+/** Scan one append-only JSONL file without materializing either the file or its lines. */
+function highestInFile(file: string, needle: string): number | null {
+  const fd = openSync(file, "r");
+  const bytes = Buffer.allocUnsafe(SPOOL_SCAN_CHUNK_BYTES);
+  const decoder = new StringDecoder("utf8");
+  // Enough overlap for a needle split across chunks plus every safe integer digit.
+  const overlap = needle.length + String(Number.MAX_SAFE_INTEGER).length;
+  let tail = "";
+  let best: number | null = null;
+
+  const inspect = (text: string): void => {
+    let from = 0;
+    while (from < text.length) {
+      const at = text.indexOf(needle, from);
+      if (at < 0) break;
+      const start = at + needle.length;
+      const match = /^\d+/.exec(text.slice(start));
+      if (match) {
+        const n = Number(match[0]);
+        if (Number.isSafeInteger(n) && (best === null || n > best)) best = n;
+      }
+      from = start;
+    }
+  };
+
+  try {
+    for (;;) {
+      const count = readSync(fd, bytes, 0, bytes.length, null);
+      if (count === 0) break;
+      const text = tail + decoder.write(bytes.subarray(0, count));
+      inspect(text);
+      tail = text.slice(-overlap);
+    }
+    const final = tail + decoder.end();
+    inspect(final);
+  } finally {
+    closeSync(fd);
+  }
+  return best;
+}
+
+/** Highest `invocation_sequence` the spool already holds for a session, or null.
+ * Recovery is bounded-memory: only a fixed byte chunk and small overlap are retained. */
 export function highestInSpool(
   spoolDir: string,
   sessionId: string | null,
@@ -120,15 +168,8 @@ export function highestInSpool(
     if (entry === STATE_DIR || !statSync(day).isDirectory()) continue;
     const file = join(day, "captures.jsonl");
     if (!existsSync(file)) continue;
-    for (const line of readFileSync(file, "utf-8").split("\n")) {
-      const at = line.indexOf(needle);
-      if (at < 0) continue;
-      const match = /^\d+/.exec(line.slice(at + needle.length));
-      if (match) {
-        const n = Number(match[0]);
-        if (best === null || n > best) best = n;
-      }
-    }
+    const inFile = highestInFile(file, needle);
+    if (inFile !== null && (best === null || inFile > best)) best = inFile;
   }
   return best;
 }

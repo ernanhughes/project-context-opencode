@@ -6,11 +6,14 @@
 import { deepEqual, equal, ok } from "node:assert/strict";
 import {
   appendFileSync,
+  closeSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   readdirSync,
   rmSync,
+  writeSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -19,6 +22,7 @@ import { test } from "node:test";
 import {
   CONTROL_SCHEMA,
   SequenceStore,
+  SPOOL_SCAN_CHUNK_BYTES,
   STATE_DIR,
   highestInSpool,
 } from "../../src/observer/sequence.ts";
@@ -132,6 +136,74 @@ test("the spool scan reads the record's own fields, not quoted text inside messa
     appendRecordLine(dir, "ses-a", 2); // its message text quotes sequence 999
     equal(highestInSpool(dir, "ses-a"), 2);
     equal(highestInSpool(dir, "ses-none"), null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("spool recovery is chunked and handles boundaries, Unicode, malformed lines, and no final newline", () => {
+  const dir = spool();
+  try {
+    const firstDay = join(dir, DAY);
+    const secondDay = join(dir, "2030-01-02");
+    mkdirSync(firstDay, { recursive: true });
+    mkdirSync(secondDay, { recursive: true });
+    const needle = '"session_id":"ses-λ","invocation_sequence":';
+    // Place the target across the fixed read boundary, inside an individual
+    // record much larger than a chunk. No line array or full record is needed.
+    const prefixLength =
+      SPOOL_SCAN_CHUNK_BYTES - Buffer.byteLength(needle, "utf8") + 4;
+    const huge = `${"x".repeat(prefixLength)}${needle}41,"payload":"${"y".repeat(SPOOL_SCAN_CHUNK_BYTES * 3)}"}`;
+    writeFileSync(
+      join(firstDay, "captures.jsonl"),
+      [
+        "{malformed jsonl",
+        JSON.stringify({ session_id: "other", invocation_sequence: 999 }),
+        huge,
+      ].join("\n"),
+      "utf8",
+    );
+    // A later day wins, and its final line deliberately has no newline.
+    writeFileSync(
+      join(secondDay, "captures.jsonl"),
+      JSON.stringify({
+        note: "雪",
+        session_id: "ses-λ",
+        invocation_sequence: 42,
+      }),
+      "utf8",
+    );
+    equal(highestInSpool(dir, "ses-λ"), 42);
+    equal(highestInSpool(dir, "other"), 999);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("large spool recovery uses fixed-size reads rather than whole-file line splitting", () => {
+  const dir = spool();
+  try {
+    mkdirSync(join(dir, DAY), { recursive: true });
+    const file = join(dir, DAY, "captures.jsonl");
+    const fd = openSync(file, "w");
+    try {
+      const block = Buffer.from(`${"z".repeat(SPOOL_SCAN_CHUNK_BYTES - 1)}\n`);
+      for (let i = 0; i < 256; i++) writeSync(fd, block);
+      writeSync(
+        fd,
+        Buffer.from(
+          JSON.stringify({ session_id: "ses-large", invocation_sequence: 73 }),
+        ),
+      );
+    } finally {
+      closeSync(fd);
+    }
+    equal(highestInSpool(dir, "ses-large"), 73);
+    const source = readFileSync(
+      join(process.cwd(), "src", "observer", "sequence.ts"),
+      "utf8",
+    );
+    ok(!source.includes('readFileSync(file, "utf-8").split'));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
